@@ -431,6 +431,7 @@ struct StyleConfig {
     indicator_sync: String,
     padding_top: usize,
     border: String,
+    delimiter: String,
     max_name_length: usize,
     start_index: usize,
 }
@@ -448,6 +449,7 @@ impl Default for StyleConfig {
             max_name_length: 20,
             padding_top: 0,
             border: String::new(),
+            delimiter: String::new(),
             start_index: 1,
         }
     }
@@ -508,6 +510,9 @@ impl ZellijPlugin for State {
             self.style.border = v.clone();
         } else if let Some(v) = configuration.get("border_char") {
             self.style.border = v.clone();
+        }
+        if let Some(v) = configuration.get("delimiter") {
+            self.style.delimiter = v.clone();
         }
         if let Some(v) = configuration.get("start_index")
             && let Ok(n) = v.parse::<usize>()
@@ -801,6 +806,46 @@ impl State {
         line
     }
 
+    fn has_delimiter(&self) -> bool {
+        !self.style.delimiter.is_empty()
+    }
+
+    /// Build a delimiter line between tabs, filling the row with the delimiter pattern
+    fn build_delimiter_line(&self, cols: usize) -> String {
+        let border = parse_styled_string(&self.style.border);
+        let border_width = border.display_width();
+        let effective_cols = cols.saturating_sub(border_width);
+
+        let delimiter = parse_styled_string(&self.style.delimiter);
+        let delim_width = delimiter.display_width();
+
+        let mut line = String::new();
+
+        if delim_width > 0 && effective_cols > 0 {
+            // Repeat the delimiter character(s) to fill the row width
+            let repeats = effective_cols / delim_width;
+            let remainder = effective_cols % delim_width;
+
+            for _ in 0..repeats {
+                line.push_str(&delimiter.to_ansi());
+            }
+            if remainder > 0 {
+                // Truncate the delimiter to fill the remaining space
+                let partial = delimiter.truncate(remainder);
+                line.push_str(&partial.to_ansi());
+            }
+        } else {
+            line.push_str(&" ".repeat(effective_cols));
+        }
+
+        // Add border
+        if border_width > 0 {
+            line.push_str(&border.to_ansi());
+        }
+
+        line
+    }
+
     /// Build a line with just the border (for empty rows)
     fn build_empty_line(&self, cols: usize) -> String {
         let border = parse_styled_string(&self.style.border);
@@ -819,12 +864,13 @@ impl State {
     fn render_vertical(&mut self, rows: usize, cols: usize) {
         let top_padding = self.style.padding_top;
         let available_rows = rows.saturating_sub(top_padding);
+        let has_delimiter = self.has_delimiter();
 
         let tab_count = self.tabs.len();
         let active_index = self.active_tab_idx.saturating_sub(1);
 
         let (start_index, end_index, tabs_above, tabs_below) =
-            calculate_visible_range(tab_count, available_rows, active_index);
+            calculate_visible_range(tab_count, available_rows, active_index, has_delimiter);
 
         let mut lines: Vec<String> = Vec::with_capacity(rows);
 
@@ -841,8 +887,13 @@ impl State {
             lines.push(self.build_line(&styled, cols, false));
         }
 
-        // Render visible tabs
+        // Render visible tabs with delimiter lines between them
         for i in start_index..end_index {
+            // Add delimiter between tabs (not before the first visible tab)
+            if has_delimiter && i > start_index {
+                lines.push(self.build_delimiter_line(cols));
+            }
+
             if let Some(tab) = self.tabs.get(i).cloned() {
                 let is_active = tab.active;
                 let format = if is_active {
@@ -886,9 +937,10 @@ impl State {
 
         let tab_count = self.tabs.len();
         let active_index = self.active_tab_idx.saturating_sub(1);
+        let has_delimiter = self.has_delimiter();
 
         let (start_index, end_index, tabs_above, _tabs_below) =
-            calculate_visible_range(tab_count, self.last_rows, active_index);
+            calculate_visible_range(tab_count, self.last_rows, active_index, has_delimiter);
 
         let content_start_row = if tabs_above > 0 { 1 } else { 0 };
 
@@ -898,18 +950,61 @@ impl State {
         }
 
         let row_in_content = row.saturating_sub(content_start_row);
-        let clicked_tab_index = start_index + row_in_content;
 
-        if clicked_tab_index < end_index && clicked_tab_index < tab_count {
-            return Some(clicked_tab_index + 1);
-        }
+        if has_delimiter {
+            // With delimiters: row 0 = tab 0, row 1 = delimiter, row 2 = tab 1, etc.
+            // Tab rows are at even indices (0, 2, 4, ...), delimiter rows at odd (1, 3, 5, ...)
+            if row_in_content % 2 == 0 {
+                // Tab row
+                let tab_offset = row_in_content / 2;
+                let clicked_tab_index = start_index + tab_offset;
+                if clicked_tab_index < end_index && clicked_tab_index < tab_count {
+                    return Some(clicked_tab_index + 1);
+                }
+            } else {
+                // Delimiter row - map click to the tab below it
+                let tab_offset = (row_in_content + 1) / 2;
+                let clicked_tab_index = start_index + tab_offset;
+                if clicked_tab_index < end_index && clicked_tab_index < tab_count {
+                    return Some(clicked_tab_index + 1);
+                }
+            }
 
-        if row_in_content >= end_index - start_index {
-            let target = end_index.min(tab_count.saturating_sub(1));
-            return Some(target + 1);
+            // Click is past the visible tabs area
+            let visible_count = end_index - start_index;
+            let total_content_rows = rows_for_tabs(visible_count, true);
+            if row_in_content >= total_content_rows {
+                let target = end_index.min(tab_count.saturating_sub(1));
+                return Some(target + 1);
+            }
+        } else {
+            let clicked_tab_index = start_index + row_in_content;
+
+            if clicked_tab_index < end_index && clicked_tab_index < tab_count {
+                return Some(clicked_tab_index + 1);
+            }
+
+            if row_in_content >= end_index - start_index {
+                let target = end_index.min(tab_count.saturating_sub(1));
+                return Some(target + 1);
+            }
         }
 
         None
+    }
+}
+
+/// Calculate how many rows N tabs consume when delimiters are enabled.
+/// N tabs with delimiters between them = N + (N-1) = 2N - 1 rows.
+/// Without delimiters = N rows.
+fn rows_for_tabs(n: usize, has_delimiter: bool) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    if has_delimiter {
+        n + (n - 1) // tab + delimiter between each pair
+    } else {
+        n
     }
 }
 
@@ -917,39 +1012,94 @@ fn calculate_visible_range(
     tab_count: usize,
     available_rows: usize,
     active_index: usize,
+    has_delimiter: bool,
 ) -> (usize, usize, usize, usize) {
     if tab_count == 0 {
         return (0, 0, 0, 0);
     }
 
-    if tab_count <= available_rows {
+    // Check if all tabs fit (with delimiters if enabled)
+    if rows_for_tabs(tab_count, has_delimiter) <= available_rows {
         return (0, tab_count, 0, 0);
     }
 
-    let max_visible = available_rows.saturating_sub(2);
-    if max_visible == 0 {
+    // Reserve 2 rows for overflow indicators (above + below)
+    let max_rows_for_tabs = available_rows.saturating_sub(2);
+    if max_rows_for_tabs == 0 {
         return (0, 0, tab_count, 0);
     }
 
+    // Start with the active tab visible
     let mut start_index = active_index;
     let mut end_index = active_index + 1;
-    let mut room_left = max_visible.saturating_sub(1);
-    let mut alternate = false;
 
-    while room_left > 0 {
-        if !alternate && start_index > 0 {
-            start_index -= 1;
-            room_left -= 1;
+    // Expand the visible range while it fits in the available rows
+    let mut alternate = false;
+    loop {
+        let candidate_start = if !alternate && start_index > 0 {
+            Some(start_index - 1)
         } else if alternate && end_index < tab_count {
-            end_index += 1;
-            room_left -= 1;
+            None // handled below
         } else if start_index > 0 {
-            start_index -= 1;
-            room_left -= 1;
-        } else if end_index < tab_count {
-            end_index += 1;
-            room_left -= 1;
+            Some(start_index - 1)
         } else {
+            None
+        };
+
+        let candidate_end = if !alternate && start_index == 0 && end_index < tab_count {
+            Some(end_index + 1)
+        } else if alternate && end_index < tab_count {
+            Some(end_index + 1)
+        } else if end_index < tab_count && (candidate_start.is_none() || start_index == 0) {
+            Some(end_index + 1)
+        } else {
+            None
+        };
+
+        // Try the preferred direction first
+        let grew = if !alternate {
+            if let Some(new_start) = candidate_start {
+                let new_count = end_index - new_start;
+                if rows_for_tabs(new_count, has_delimiter) <= max_rows_for_tabs {
+                    start_index = new_start;
+                    true
+                } else {
+                    false
+                }
+            } else if let Some(new_end) = candidate_end {
+                let new_count = new_end - start_index;
+                if rows_for_tabs(new_count, has_delimiter) <= max_rows_for_tabs {
+                    end_index = new_end;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            if let Some(new_end) = candidate_end {
+                let new_count = new_end - start_index;
+                if rows_for_tabs(new_count, has_delimiter) <= max_rows_for_tabs {
+                    end_index = new_end;
+                    true
+                } else {
+                    false
+                }
+            } else if let Some(new_start) = candidate_start {
+                let new_count = end_index - new_start;
+                if rows_for_tabs(new_count, has_delimiter) <= max_rows_for_tabs {
+                    start_index = new_start;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if !grew {
             break;
         }
         alternate = !alternate;

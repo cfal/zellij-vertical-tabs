@@ -23,6 +23,9 @@ layout {
                 indicator_fullscreen "□"
                 indicator_sync "⇄"
                 max_name_length 14
+
+                // Styled delimiter line between tabs (supports #[fg=color] syntax)
+                // delimiter "#[fg=dim]─"
             }
         }
         pane
