@@ -424,6 +424,9 @@ fn parse_styled_string(s: &str) -> StyledText {
 struct StyleConfig {
     format: String,
     format_active: String,
+    /// Optional second line per tab (e.g. for path/cwd). Empty = single-line mode.
+    format_secondary: String,
+    format_active_secondary: String,
     overflow_above: String,
     overflow_below: String,
     indicator_active: String,
@@ -440,6 +443,8 @@ impl Default for StyleConfig {
         Self {
             format: "{index}:{name}".to_string(),
             format_active: "{index}:{name} {indicators}".to_string(),
+            format_secondary: String::new(),
+            format_active_secondary: String::new(),
             overflow_above: "  ^ +{count}".to_string(),
             overflow_below: "  v +{count}".to_string(),
             indicator_active: "*".to_string(),
@@ -478,6 +483,12 @@ impl ZellijPlugin for State {
         }
         if let Some(v) = configuration.get("format_active") {
             self.style.format_active = v.clone();
+        }
+        if let Some(v) = configuration.get("format_secondary") {
+            self.style.format_secondary = v.clone();
+        }
+        if let Some(v) = configuration.get("format_active_secondary") {
+            self.style.format_active_secondary = v.clone();
         }
         if let Some(v) = configuration.get("overflow_above") {
             self.style.overflow_above = v.clone();
@@ -631,6 +642,15 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    /// Returns 2 when a secondary format is configured, else 1.
+    fn rows_per_tab(&self) -> usize {
+        if self.style.format_secondary.is_empty() && self.style.format_active_secondary.is_empty() {
+            1
+        } else {
+            2
+        }
+    }
+
     fn get_focused_pane_title(&self, tab_position: usize) -> Option<String> {
         if let Some(panes) = self.pane_manifest.panes.get(&tab_position) {
             for pane in panes {
@@ -822,9 +842,10 @@ impl State {
 
         let tab_count = self.tabs.len();
         let active_index = self.active_tab_idx.saturating_sub(1);
+        let rows_per_tab = self.rows_per_tab();
 
         let (start_index, end_index, tabs_above, tabs_below) =
-            calculate_visible_range(tab_count, available_rows, active_index);
+            calculate_visible_range(tab_count, available_rows, active_index, rows_per_tab);
 
         let mut lines: Vec<String> = Vec::with_capacity(rows);
 
@@ -853,6 +874,18 @@ impl State {
 
                 let styled = self.expand_tmux_format(format, &tab, i + self.style.start_index);
                 lines.push(self.build_line(&styled, cols, is_active));
+
+                // Secondary line (if configured)
+                let secondary = if is_active {
+                    &self.style.format_active_secondary
+                } else {
+                    &self.style.format_secondary
+                };
+                if !secondary.is_empty() {
+                    let styled =
+                        self.expand_tmux_format(secondary, &tab, i + self.style.start_index);
+                    lines.push(self.build_line(&styled, cols, is_active));
+                }
             }
         }
 
@@ -886,25 +919,27 @@ impl State {
 
         let tab_count = self.tabs.len();
         let active_index = self.active_tab_idx.saturating_sub(1);
+        let rows_per_tab = self.rows_per_tab();
 
         let (start_index, end_index, tabs_above, _tabs_below) =
-            calculate_visible_range(tab_count, self.last_rows, active_index);
+            calculate_visible_range(tab_count, self.last_rows, active_index, rows_per_tab);
 
-        let content_start_row = if tabs_above > 0 { 1 } else { 0 };
+        let content_start_row = self.style.padding_top + if tabs_above > 0 { 1 } else { 0 };
 
-        if tabs_above > 0 && row == 0 {
+        if tabs_above > 0 && row == self.style.padding_top {
             let target = start_index.saturating_sub(1);
             return Some(target + 1);
         }
 
         let row_in_content = row.saturating_sub(content_start_row);
-        let clicked_tab_index = start_index + row_in_content;
+        let clicked_tab_offset = row_in_content / rows_per_tab;
+        let clicked_tab_index = start_index + clicked_tab_offset;
 
         if clicked_tab_index < end_index && clicked_tab_index < tab_count {
             return Some(clicked_tab_index + 1);
         }
 
-        if row_in_content >= end_index - start_index {
+        if clicked_tab_offset >= end_index - start_index {
             let target = end_index.min(tab_count.saturating_sub(1));
             return Some(target + 1);
         }
@@ -917,16 +952,21 @@ fn calculate_visible_range(
     tab_count: usize,
     available_rows: usize,
     active_index: usize,
+    rows_per_tab: usize,
 ) -> (usize, usize, usize, usize) {
     if tab_count == 0 {
         return (0, 0, 0, 0);
     }
 
-    if tab_count <= available_rows {
+    let rows_per_tab = rows_per_tab.max(1);
+
+    if tab_count.saturating_mul(rows_per_tab) <= available_rows {
         return (0, tab_count, 0, 0);
     }
 
-    let max_visible = available_rows.saturating_sub(2);
+    // 2 rows reserved for overflow indicators (above + below), each 1-row regardless of rows_per_tab.
+    let max_visible_rows = available_rows.saturating_sub(2);
+    let max_visible = max_visible_rows / rows_per_tab;
     if max_visible == 0 {
         return (0, 0, tab_count, 0);
     }
