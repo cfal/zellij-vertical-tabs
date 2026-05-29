@@ -21,6 +21,8 @@ Horizontal tab bars become hard to read when you have many tabs - names get trun
   - `S` - Sync panes mode active
 - **Tab numbering** - Each tab prefixed with its number (e.g., `1:shell`)
 - **Name truncation** - Long tab names truncated with `...` to fit width
+- **Left-truncation with path snap** - `{=<N:var}` keeps the *end* of a string and snaps to path boundaries (e.g. `~/repos/personal/codex-technomanticus` → `…/codex-technomanticus`)
+- **Two-line tabs** - Optional `format_secondary` renders a second line per tab (e.g. for paths, Zed-style)
 - **Tmux-style formatting** - Inline color syntax like `#[fg=accent]`
 - **Pane title support** - Display focused pane's terminal title via `{title}`
 
@@ -174,6 +176,11 @@ plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm" {
     // Active tab format
     format_active "{index}:{name}*"
 
+    // Optional second line per tab (empty = single-line, default).
+    // Renders below `format` / `format_active` for each tab.
+    format_secondary ""
+    format_active_secondary ""
+
     // Status indicators
     indicator_active "*"
     indicator_fullscreen "Z"
@@ -264,11 +271,60 @@ format_active "#[fg=green]{index}:{title}*"
 
 ### Truncation
 
-Use `{=width:var}` to truncate a variable to a specific width:
+Use `{=width:var}` to truncate a variable to a specific width. By default
+truncation happens at the **end** (keeps the start, suffixed with `...`):
 
 ```kdl
-format "{index}:{=12:title}"  // Truncate title to 12 chars
+format "{index}:{=12:title}"  // "my-very-lo..."
 ```
+
+Prefix the width with `<` to truncate at the **start** instead (keeps the
+end, prefixed with `…`). When the value contains `/`, the cut snaps to the
+longest path-component suffix that still fits, so paths render cleanly:
+
+```kdl
+format "{=<22:title}"
+```
+
+| Value | Width | Result |
+|-------|-------|--------|
+| `~/repos/medesp/api` | 22 | `~/repos/medesp/api` (no truncation needed) |
+| `~/repos/personal/codex-technomanticus` | 22 | `…/codex-technomanticus` |
+| `~/repos/personal/codex-technomanticus` | 32 | `…/personal/codex-technomanticus` |
+| `string-without-slashes` (length 22) | 14 | `…thout-slashes` |
+
+### Two-Line Tabs (Zed-style)
+
+Set `format_secondary` and `format_active_secondary` to render each tab on
+two lines — useful for showing the tab name on top and the working path
+below. Overflow math and click handling adapt automatically.
+
+```kdl
+plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm" {
+    format                  "  {=26:name}"
+    format_secondary        "  #[fg=245]{=<26:title}"
+    format_active           "#[bg=240,fg=white,fill]  {=24:name} {indicators}"
+    format_active_secondary "#[bg=240,fg=252,fill]  {=<26:title}"
+    indicator_active     "●"
+    max_name_length "26"
+    padding_top "1"
+}
+```
+
+To populate `{title}` with the current directory, have your shell send an
+OSC 2 sequence with the cwd on every prompt. For zsh:
+
+```zsh
+if [[ -n "$ZELLIJ" ]]; then
+  autoload -Uz add-zsh-hook
+  _set_pane_title() { print -Pn "\e]2;%~\a"; }
+  add-zsh-hook precmd _set_pane_title
+  add-zsh-hook chpwd _set_pane_title
+fi
+```
+
+Then set the tab name once (e.g. `Ctrl+T r` or via `zellij action rename-tab`)
+and the path will update automatically as you `cd` around.
 
 ---
 
