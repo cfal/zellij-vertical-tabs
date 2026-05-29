@@ -269,8 +269,12 @@ impl StyledText {
 enum FormatToken {
     /// Style directive: #[fg=color,bg=color,bold,dim]
     Style(InlineStyle),
-    /// Variable with optional width: {var} or {=12:var}
-    Variable { name: String, width: Option<usize> },
+    /// Variable with optional width: {var}, {=12:var}, or {=<12:var} (left-truncate)
+    Variable {
+        name: String,
+        width: Option<usize>,
+        truncate_left: bool,
+    },
     /// Plain text
     Literal(String),
 }
@@ -373,16 +377,22 @@ fn parse_variable(chars: &mut std::iter::Peekable<std::str::Chars>) -> FormatTok
         content.push(chars.next().unwrap());
     }
 
-    // Check for width specifier: =12:varname
+    // Check for width specifier: =12:varname (right-truncate)
+    // or =<12:varname (left-truncate, keeps end of string, path-aware)
     if let Some(rest) = content.strip_prefix('=')
         && let Some(colon_pos) = rest.find(':')
     {
-        let width_str = &rest[..colon_pos];
+        let width_spec = &rest[..colon_pos];
         let var_name = &rest[colon_pos + 1..];
+        let (truncate_left, width_str) = match width_spec.strip_prefix('<') {
+            Some(s) => (true, s),
+            None => (false, width_spec),
+        };
         if let Ok(width) = width_str.parse::<usize>() {
             return FormatToken::Variable {
                 name: var_name.to_string(),
                 width: Some(width),
+                truncate_left,
             };
         }
     }
@@ -390,6 +400,7 @@ fn parse_variable(chars: &mut std::iter::Peekable<std::str::Chars>) -> FormatTok
     FormatToken::Variable {
         name: content,
         width: None,
+        truncate_left: false,
     }
 }
 
@@ -408,7 +419,8 @@ fn parse_styled_string(s: &str) -> StyledText {
                 result.push(text, current_style.clone());
             }
             FormatToken::Variable { name, .. } => {
-                // Variables in border strings are not expanded, treat as literal
+                // Variables in border strings are not expanded, treat as literal.
+                // (truncate_left flag also ignored here.)
                 result.push(format!("{{{}}}", name), current_style.clone());
             }
         }
@@ -706,7 +718,11 @@ impl State {
                 FormatToken::Style(style) => {
                     current_style = style;
                 }
-                FormatToken::Variable { name, width } => {
+                FormatToken::Variable {
+                    name,
+                    width,
+                    truncate_left,
+                } => {
                     let value = match name.as_str() {
                         "index" | "i" => index.to_string(),
                         "name" | "n" => {
@@ -747,10 +763,11 @@ impl State {
                         _ => format!("{{{}}}", name),
                     };
 
-                    let text = if let Some(w) = width {
-                        truncate_string(&value, w)
+                    let effective_width = width.unwrap_or(self.style.max_name_length);
+                    let text = if truncate_left {
+                        truncate_string_left(&value, effective_width)
                     } else {
-                        truncate_string(&value, self.style.max_name_length)
+                        truncate_string(&value, effective_width)
                     };
 
                     result.push(text, current_style.clone());
@@ -1024,4 +1041,49 @@ fn truncate_string(s: &str, max_width: usize) -> String {
         width += ch_width;
     }
     truncated
+}
+
+/// Truncate from the LEFT, keeping the end of the string. Adds "…" prefix.
+/// Path-aware: if the string contains '/', snaps the cut to the longest
+/// path-component suffix that fits within max_width.
+fn truncate_string_left(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = ellipsis.width();
+
+    // Path-aware: try each '/' position, picking the longest suffix that fits.
+    let slash_positions: Vec<usize> = s
+        .char_indices()
+        .filter(|(_, c)| *c == '/')
+        .map(|(i, _)| i)
+        .collect();
+
+    for &pos in &slash_positions {
+        let suffix = &s[pos..];
+        if suffix.width() + ellipsis_width <= max_width {
+            return format!("{}{}", ellipsis, suffix);
+        }
+    }
+
+    // No path-boundary fit (or no slashes): char-level left-truncate.
+    let target_width = max_width.saturating_sub(ellipsis_width);
+    let mut suffix_chars: Vec<char> = Vec::new();
+    let mut width = 0;
+    for ch in s.chars().rev() {
+        let ch_width = ch.to_string().width();
+        if width + ch_width > target_width {
+            break;
+        }
+        suffix_chars.push(ch);
+        width += ch_width;
+    }
+    suffix_chars.reverse();
+    let suffix: String = suffix_chars.iter().collect();
+    format!("{}{}", ellipsis, suffix)
 }
