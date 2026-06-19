@@ -23,6 +23,7 @@ Horizontal tab bars become hard to read when you have many tabs - names get trun
 - **Name truncation** - Long tab names truncated with `...` to fit width
 - **Tmux-style formatting** - Inline color syntax like `#[fg=accent]`
 - **Pane title support** - Display focused pane's terminal title via `{title}`
+- **Activity rows** - Optional extra lines under a tab, fed live by an external `pipe` message (e.g. surface an agent's running tasks)
 
 ## Requirements
 
@@ -194,6 +195,9 @@ plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm" {
     // Overflow indicator formats (when tabs don't fit)
     overflow_above "  ^ +{count}"
     overflow_below "  v +{count}"
+
+    // Activity row format ({activity} = the row text)
+    activity_format "#[fg=dim]{activity}"
 }
 ```
 
@@ -323,6 +327,47 @@ When you have more tabs than can fit in the available rows, the plugin shows ove
 ```
 
 The viewport automatically scrolls to keep the active tab visible when you switch tabs.
+
+---
+
+## Activity Rows (pipe-fed)
+
+Beyond the tab list, the plugin can render **activity rows** beneath a tab — short lines driven by an external producer over zellij's plugin pipe. This is generic: anything that can run `zellij pipe` can feed it. The motivating use case is surfacing a coding agent's live state (running sub-agents, a todo list) next to the session it belongs to; [Claude Code](https://www.claude.com/product/claude-code) is one such producer.
+
+### Feeding activity
+
+Send a pipe message named `activity` with a JSON payload:
+
+```bash
+zellij pipe --name activity -- '{
+  "zsession": "my-session",
+  "name": "build",
+  "subagents": {
+    "a1": { "icon": "⌕", "glyph": "◉", "title": "explore auth" }
+  },
+  "todos": [
+    { "status": "in_progress", "text": "run tests" },
+    { "status": "pending",     "text": "write migration" },
+    { "status": "done",        "text": "scaffold" }
+  ]
+}'
+```
+
+| Field | Meaning |
+|-------|---------|
+| `zsession` | The zellij session the rows belong to. |
+| `name` | The tab/pane name the rows attach to. Rows render under the tab whose focused pane title (or tab name) matches. |
+| `subagents` | Map of `id → {icon, glyph, title}`. `icon`/`glyph` default to `⊜`/`⚙` when omitted. |
+| `todos` | List of `{status, text}`, where `status` is `pending`, `in_progress`, or `done`. |
+
+### Rendering
+
+- If `subagents` is non-empty, each renders as `  {icon} {glyph} {title}` (or `  {icon} {glyph}` when `title` is empty). **Subagents take priority** — when any are present, todos are not shown.
+- Otherwise, **non-done** todos render with a checkbox: `☐` pending, `▣` in_progress (done items are hidden). Up to 6 are shown; a trailing `  …` indicates more.
+- Rows are truncated to the tab bar width.
+- Styling is set by the `activity_format` layout option (default `#[fg=dim]{activity}`), where `{activity}` is the row text — uses the same inline color syntax as `format`.
+
+The plugin renders the most recent payload received for a given `(zsession, name)`. Freshness — for example dropping a finished sub-agent — is the producer's responsibility: send an updated payload to change what's shown.
 
 ---
 
