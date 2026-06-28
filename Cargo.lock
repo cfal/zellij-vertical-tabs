@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "activity"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3348,6 +3356,7 @@ dependencies = [
 name = "zellij-vertical-tabs"
 version = "0.1.0"
 dependencies = [
+ "activity",
  "unicode-width 0.2.2",
  "zellij-tile",
 ]

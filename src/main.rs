@@ -433,6 +433,7 @@ struct StyleConfig {
     border: String,
     max_name_length: usize,
     start_index: usize,
+    activity_format: String,
 }
 
 impl Default for StyleConfig {
@@ -449,6 +450,7 @@ impl Default for StyleConfig {
             padding_top: 0,
             border: String::new(),
             start_index: 1,
+            activity_format: "#[fg=dim]{activity}".to_string(),
         }
     }
 }
@@ -466,6 +468,8 @@ struct State {
     permissions_granted: bool,
     is_selectable: bool,
     pending_events: Vec<Event>,
+    activity: BTreeMap<String, activity::Activity>,
+    own_session: String,
 }
 
 register_plugin!(State);
@@ -514,6 +518,9 @@ impl ZellijPlugin for State {
         {
             self.style.start_index = n;
         }
+        if let Some(v) = configuration.get("activity_format") {
+            self.style.activity_format = v.clone();
+        }
 
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -526,6 +533,7 @@ impl ZellijPlugin for State {
             EventType::ModeUpdate,
             EventType::Mouse,
             EventType::PermissionRequestResult,
+            EventType::SessionUpdate,
         ]);
     }
 
@@ -589,6 +597,14 @@ impl ZellijPlugin for State {
                 }
                 _ => {}
             },
+            Event::SessionUpdate(sessions, _) => {
+                if let Some(s) = sessions.iter().find(|s| s.is_current_session)
+                    && self.own_session != s.name
+                {
+                    self.own_session = s.name.clone();
+                    should_render = true;
+                }
+            }
             _ => {}
         }
         should_render
@@ -613,6 +629,16 @@ impl ZellijPlugin for State {
             "toggle_selectable" => {
                 self.is_selectable = !self.is_selectable;
                 set_selectable(self.is_selectable);
+                false
+            }
+            "activity" => {
+                if let Some(payload) = pipe_message.payload.as_deref()
+                    && let Some((zsession, name, act)) = activity::parse_activity(payload)
+                {
+                    self.activity
+                        .insert(format!("{}\u{1}{}", zsession, name), act);
+                    return true;
+                }
                 false
             }
             _ => false,
@@ -843,6 +869,9 @@ impl State {
 
         // Render visible tabs
         for i in start_index..end_index {
+            if lines.len() >= rows {
+                break;
+            }
             if let Some(tab) = self.tabs.get(i).cloned() {
                 let is_active = tab.active;
                 let format = if is_active {
@@ -853,6 +882,22 @@ impl State {
 
                 let styled = self.expand_tmux_format(format, &tab, i + self.style.start_index);
                 lines.push(self.build_line(&styled, cols, is_active));
+
+                let pane = self
+                    .get_focused_pane_title(tab.position)
+                    .map(|t| norm_session_name(&t))
+                    .unwrap_or_else(|| norm_session_name(&tab.name));
+                let key = format!("{}\u{1}{}", self.own_session, pane);
+                if let Some(act) = self.activity.get(&key) {
+                    for arow in activity::render_activity(act, cols) {
+                        if lines.len() >= rows {
+                            break;
+                        }
+                        let arendered = self.style.activity_format.replace("{activity}", &arow);
+                        let astyled = parse_styled_string(&arendered);
+                        lines.push(self.build_line(&astyled, cols, false));
+                    }
+                }
             }
         }
 
@@ -961,6 +1006,22 @@ fn calculate_visible_range(
         start_index,
         tab_count.saturating_sub(end_index),
     )
+}
+
+fn norm_session_name(s: &str) -> String {
+    let t = s.trim_start();
+    let mut chars = t.chars();
+    if let Some(first) = chars.clone().next()
+        && !first.is_alphanumeric()
+    {
+        return chars
+            .by_ref()
+            .skip(1)
+            .collect::<String>()
+            .trim_start()
+            .to_string();
+    }
+    t.to_string()
 }
 
 fn truncate_string(s: &str, max_width: usize) -> String {
