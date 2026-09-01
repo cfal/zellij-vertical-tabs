@@ -635,8 +635,10 @@ impl ZellijPlugin for State {
                 if let Some(payload) = pipe_message.payload.as_deref()
                     && let Some((zsession, name, act)) = activity::parse_activity(payload)
                 {
-                    self.activity
-                        .insert(format!("{}\u{1}{}", zsession, name), act);
+                    self.activity.insert(
+                        format!("{}\u{1}{}", zsession, norm_session_name(&name)),
+                        act,
+                    );
                     return true;
                 }
                 false
